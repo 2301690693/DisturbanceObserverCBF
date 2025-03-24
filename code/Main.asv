@@ -1,0 +1,185 @@
+clear
+close all
+g = 9.81;
+m = 1650;
+
+f0 = 0.1;
+f1 = 5;
+f2 = 0.25;
+ca = 1;
+cd = 1;
+Th = 1.8;
+vl = 14;
+vd = 24;
+
+T = 20;
+t_step = 0.005;
+
+x0 = [0;20;100];
+x_c = x0;
+% clf 参数
+alpha_v = 5;
+beta_c = 5;
+beta_e = 10;
+beta = 1/300;
+storage = [];
+cnt = 1;
+
+C = [1, 0];
+A = [0, 1; 
+    -4*pi*2, 0];
+sx = [0, 3363.9, 0;
+    0, 16819.5, 0];
+rx = [3363.9; 16819.5];
+z0 = [0;0];
+doz = z0;
+hat_d = 0;
+
+
+syms p v z
+h_x = z - v - 0.5*(v-vl)^2/(cd*g);
+dhx = [diff(h_x,p) diff(h_x,v) diff(h_x,z)];
+hx = matlabFunction(h_x);
+dhx = matlabFunction(dhx);
+
+observer = 1;
+for t = 0:t_step:T
+
+    z = x_c(3);
+    v = x_c(2);
+    p = x_c(1);
+    V = (v - vd)^2;
+    
+    Fr = GetFr(f0,f1,f2,v);
+    fx = [v;-Fr/m;vl - v];
+    g1 = [0;1/m;0];
+    g2 = [0;g/m;0];
+    kdx = g;
+
+    dVdx = [0,2*(v - vd),0];
+
+    LfV = dVdx*fx;
+    Lg1V = dVdx*g1;
+    lg2V = dVdx*g1;
+    Aclf = [Lg1V,-1];
+    % Bclf = -alpha_v * V-LfV-lg2V*hat_d;
+    Bclf = -alpha_v * V-LfV;
+
+    h = hx(v,z);
+    dhdx = dhx(v);
+    Lfh = dhdx*fx;
+    Lg1h = dhdx*g1;
+    Lg2h = dhdx*g1;
+    Acbf = [-Lg1h,0];
+    if observer == 1
+        Bcbf = beta_c * h + Lfh - (Lg2h^2)/(2*beta*(2*beta_e - beta_c));
+    else
+        Bcbf = beta_c * h + Lfh;
+    end
+    
+    H0 = (2/m)^2;
+    mu = 2*(0.01);
+    H = diag([2*H0,2*mu]);
+    f = [-(4/m^2)*Fr;0];
+    Au = [Aclf;Acbf];
+    Bu = [Bclf;Bcbf];
+    out = quadprog(H,f,Au,Bu);
+    hat_u = out(1);
+    if observer == 1
+        d = 200*cos(2*pi*t);
+        u = out(1) + kdx*hat_d;
+        [hat_d,z_new] = DisturbanceObserver(A,C,g2,rx,sx,fx,g1,doz,u,v,t,t_step);
+        de = hat_d - d;
+        doz = z_new;
+        storage.de(cnt,:) = de';
+    else
+        d = 00*cos(2*pi*t);
+        u = out(1);
+    end
+    u = InputConstraints(u ,cd,ca,m,g);
+    sigma = out(2);
+    
+    [~,Y] = ode45(@(t,y) Dynamics(t,y,u,d,vl,f0,f1,f2,m,g),[t,t+t_step],x_c);
+    x_c = Y(end,:);
+
+
+
+    % Acbf = 
+    storage.x(cnt,:) = x_c';
+    storage.u(cnt,:) = u';
+    storage.sigma(cnt,:) = sigma';
+    storage.h(cnt,:) = h';
+    storage.V(cnt,:) = V';
+    
+    cnt = cnt+1;
+
+
+end
+close all
+figure
+t = 0:t_step:T;
+subplot(2,2,1)
+hold on
+plot(t,vd*one(size(t)),"Color",[1,0,0],LineStyle="--");
+hold on
+plot(t,vl*one(size(t)),"Color",[1,0,0],LineStyle="--");
+hold on
+plot(t,storage.x(:,2));
+subplot(2,2,2)
+plot(t,storage.x(:,3));
+subplot(2,2,3)
+hold on
+plot(t,cd*one(size(t)),"Color",[1,0,0],LineStyle="--");
+hold on
+plot(t,vl*one(size(t)),"Color",[1,0,0],LineStyle="--");
+hold on
+plot(t,storage.u);
+subplot(2,2,4)
+plot(t,storage.sigma);
+
+figure
+subplot(2,1,1)
+plot(t,storage.h);
+subplot(2,1,2)
+plot(t,storage.V);
+
+figure
+plot(t,storage.de);
+function dy =  Dynamics(~,s,u,d,vl,f0,f1,f2,m,g)
+    % p = s(1);
+    v = s(2);
+    dz = vl - v;
+    dp = v;
+    Fr = GetFr(f0,f1,f2,v);
+    dv = - Fr/m + 1/m *u + 1/m *g*d;
+    dy = [dp;dv;dz];
+end
+
+function Fr = GetFr(f0,f1,f2,v)
+    Fr = f0 + f1*v + f2*v^2;
+end
+
+function u_out = InputConstraints(u,cd,ca,m,g)
+    u_out = u;   
+    if u > ca*m*g
+        u_out = ca*m*g;
+    elseif u < -cd*m*g
+        u_out = -cd*m*g;
+    end
+end
+
+% function h = GetHx(z,v,Th,vl,cd,g)
+%     h = z - Th*v - 0.5*(v-vl)^2/(cd*g);
+% end
+
+function [hat_d,z_new] = DisturbanceObserver(A,C,g2,rx,sx,f,g1,z,u,v,t,t_step)
+    rx = rx*v;
+    [~,Y] = ode45(@(t,z) DoDyamic(t,z,A,C,g2,rx,sx,f,g1,u),[t,t+t_step],z);
+    z_new = Y(end,:)';
+    hat_xi = z + rx;
+    hat_d = C*hat_xi;
+    % dz = z;
+    function dz = DoDyamic(~,z,A,C,g2,rx,sx,f,g1,u)
+        dz = (A - sx*g2*C)*z + A*(rx) - sx*(g2*C*(rx) + f +g1*u);
+    end
+end
